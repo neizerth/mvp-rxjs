@@ -1,14 +1,12 @@
 import type { Message, Connection } from '../shared/contract';
 
 export type Action =
-  | { type: 'receive'; message: Message }
-  | { type: 'sendRequested'; clientId: string; text: string }
-  | { type: 'acked'; clientId: string; message: Message }
-  | { type: 'failed'; clientId: string }
-  | { type: 'olderLoaded'; messages: Message[]; hasMore: boolean }
-  | { type: 'connectionChanged'; state: Connection }
-  | { type: 'bannerShow' }
-  | { type: 'bannerHide' };
+  | { type: 'message/send'; clientId: string; text: string }
+  | { type: 'message/retry'; clientId: string }
+  | { type: 'message/receive'; message: Message }
+  | { type: 'outbox/flush' }
+  | { type: 'loadOlder/request' }
+  | { type: 'connection/change'; state: Connection };
 
 export interface State {
   messages: Message[];

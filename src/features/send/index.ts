@@ -1,78 +1,49 @@
-import type { StoreApi } from 'zustand';
+import { Observable, Subject } from 'rxjs';
+import { filter, mergeMap, timeout, catchError } from 'rxjs/operators';
+import { from, of } from 'rxjs';
+import type { Deps } from '../deps';
+import type { Action } from '../../model/types';
 import type { Message } from '../../shared/contract';
-import type { Transport } from '../../shared/transport';
 
-interface AppState {
-  messages: Message[];
-  failedMessages: Set<string>;
-  pendingMessages: Map<string, Message>;
-  connection: string;
-}
+export function createSendFeature(deps: Deps, actions$: Subject<Action>): Observable<void> {
+  return actions$.pipe(
+    filter((a): a is { type: 'message/send'; clientId: string; text: string } | { type: 'message/retry'; clientId: string } =>
+      a.type === 'message/send' || a.type === 'message/retry'
+    ),
+    mergeMap((action) => {
+      const isNewSend = action.type === 'message/send';
+      const { clientId, text } = isNewSend
+        ? action as { type: 'message/send'; clientId: string; text: string }
+        : (() => {
+            const state = deps.store.getState();
+            const msg = state.pendingMessages.get(action.clientId);
+            return { clientId: action.clientId, text: msg?.text || '' };
+          })();
 
-export function createSendProcess(deps: {
-  store: StoreApi<AppState>;
-  transport: Transport;
-}) {
-  const { store, transport } = deps;
-  const activeRequests = new Map<string, ReturnType<typeof setTimeout>>();
-
-  const processSend = (clientId: string, text: string) => {
-    const timeoutId = setTimeout(() => {
-      const s = store.getState();
-      if (s.pendingMessages.has(clientId)) {
-        const failed = new Set(s.failedMessages);
-        failed.add(clientId);
-        store.setState({
-          ...s,
-          failedMessages: failed,
-        });
+      const state = deps.store.getState();
+      if (isNewSend) {
+        const msg: Message = {
+          id: `pending-${clientId}`,
+          clientId,
+          text,
+          author: 'me',
+          createdAt: Date.now(),
+        };
+        state.addPending(msg);
       }
-      activeRequests.delete(clientId);
-    }, 10000);
 
-    activeRequests.set(clientId, timeoutId);
-
-    transport.send(clientId, text).then(
-      () => {
-        // Message will come through backend.on() - receive handler will update it
-        clearTimeout(timeoutId);
-        activeRequests.delete(clientId);
-      },
-      (error) => {
-        if (error.message !== 'offline') {
-          clearTimeout(timeoutId);
-          const s = store.getState();
-          const failed = new Set(s.failedMessages);
-          failed.add(clientId);
-          store.setState({
-            ...s,
-            failedMessages: failed,
-          });
-          activeRequests.delete(clientId);
-        }
-      }
-    );
-  };
-
-  const unsubBackend = transport.backend.on((event) => {
-    const s = store.getState();
-    if (event.type === 'connection' && event.state === 'connected') {
-      s.pendingMessages.forEach((msg, clientId) => {
-        if (!s.failedMessages.has(clientId) && !activeRequests.has(clientId)) {
-          processSend(clientId, msg.text);
-        }
-      });
-    }
-  });
-
-  // Store reference to processSend for manual sends from useChat
-  (deps.store as any).__processSend = processSend;
-
-  return {
-    unsubscribe() {
-      unsubBackend();
-      activeRequests.forEach((t) => clearTimeout(t));
-      activeRequests.clear();
-    },
-  };
+      return from(deps.transport.send(clientId, text)).pipe(
+        timeout(10000),
+        mergeMap((message) => {
+          state.markSent(clientId, message);
+          return of();
+        }),
+        catchError((error) => {
+          if (error.message === 'offline') return of();
+          state.markFailed(clientId);
+          return of();
+        })
+      );
+    })
+  );
 }

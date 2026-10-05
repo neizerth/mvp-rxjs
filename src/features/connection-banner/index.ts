@@ -1,56 +1,39 @@
-import type { StoreApi } from 'zustand';
-import type { Connection } from '../../shared/contract';
-import type { Transport } from '../../shared/transport';
+import { Observable } from 'rxjs';
+import type { Deps } from '../deps';
+import type { BackendEvent } from '../../shared/contract';
 
-interface AppState {
-  connection: Connection;
-  showConnectionBanner: boolean;
-}
+export function createBannerFeature(deps: Deps): Observable<void> {
+  return new Observable((subscriber) => {
+    let bannerTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function createBannerProcess(deps: {
-  store: StoreApi<AppState>;
-  transport: Transport;
-}) {
-  const { store, transport } = deps;
-  let bannerTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsub = deps.transport.backend.on((event: BackendEvent) => {
+      if (event.type === 'connection') {
+        const state = deps.store.getState();
+        state.setConnection(event.state);
 
-  const unsubBackend = transport.backend.on((event) => {
-    if (event.type === 'connection') {
-      const s = store.getState();
-      const newConn = event.state;
-
-      if (newConn === 'reconnecting') {
-        if (s.connection !== 'reconnecting') {
+        if (event.state === 'reconnecting') {
           if (bannerTimer) clearTimeout(bannerTimer);
           bannerTimer = setTimeout(() => {
-            const st = store.getState();
-            if (st.connection === 'reconnecting') {
-              store.setState({
-                ...st,
-                showConnectionBanner: true,
-              });
+            const s = deps.store.getState();
+            if (s.connection === 'reconnecting') {
+              s.setBanner(true);
             }
           }, 3000);
+        } else {
+          if (bannerTimer) clearTimeout(bannerTimer);
+          state.setBanner(false);
         }
-        store.setState({ ...s, connection: newConn });
-      } else {
-        if (bannerTimer) {
-          clearTimeout(bannerTimer);
-          bannerTimer = null;
-        }
-        store.setState({
-          ...s,
-          connection: newConn,
-          showConnectionBanner: false,
-        });
       }
-    }
-  });
+    });
 
-  return {
-    unsubscribe() {
+    subscriber.add(() => {
       if (bannerTimer) clearTimeout(bannerTimer);
-      unsubBackend();
-    },
-  };
+      unsub();
+    });
+
+    return () => {
+      if (bannerTimer) clearTimeout(bannerTimer);
+      unsub();
+    };
+  });
 }
