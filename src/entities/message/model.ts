@@ -1,79 +1,50 @@
-import type { Message } from '../../shared/contract';
-import { sortMessages } from './sort';
+import type { ChatItem, Delivery, Message } from '../../shared/contract';
 
-export interface MessageState {
-  messages: Message[];
-  pendingMessages: Map<string, Message>;
-  failedMessages: Set<string>;
-  oldestId: string | undefined;
+type Set<S> = (fn: (s: S) => Partial<S>) => void;
+
+export interface MessagesSlice {
+  messages: ChatItem[];
   hasOlder: boolean;
   loadingOlder: boolean;
+  addPending(item: ChatItem): void;
+  receive(message: Message): void;
+  markSent(clientId: string, id: string): void;
+  markFailed(clientId: string): void;
+  markPending(clientId: string): void;
+  loadOlderStarted(): void;
+  loadOlderDone(page: Message[], hasMore: boolean): void;
+  loadOlderFailed(): void;
 }
 
-export const messageActions = {
-  addMessage(state: MessageState, message: Message): MessageState {
-    const existing = state.messages.find((m) => m.id === message.id);
-    if (existing) return state;
-    const msgs = sortMessages([...state.messages, message]);
-    return {
-      ...state,
-      messages: msgs,
-      pendingMessages: new Map(
-        [...state.pendingMessages].filter((k) => k[0] !== message.clientId)
-      ),
-      failedMessages: new Set(
-        [...state.failedMessages].filter((id) => id !== message.clientId)
-      ),
-    };
-  },
+// Статус сообщения — мини-FSM: pending → sent | failed, failed → pending | sent. Остальное игнорируем.
+const allowed: Record<Delivery, Delivery[]> = { pending: ['sent', 'failed'], failed: ['pending', 'sent'], sent: [] };
 
-  markSent(state: MessageState, clientId: string, msg: Message): MessageState {
-    const newMsgs = sortMessages([...state.messages.filter((m) => m.clientId !== clientId), msg]);
-    return {
-      ...state,
-      messages: newMsgs,
-      pendingMessages: new Map([...state.pendingMessages].filter((k) => k[0] !== clientId)),
-      failedMessages: new Set([...state.failedMessages].filter((id) => id !== clientId)),
-    };
-  },
+const byTime = (a: ChatItem, b: ChatItem) => a.createdAt - b.createdAt || a.id.localeCompare(b.id);
 
-  markFailed(state: MessageState, clientId: string): MessageState {
-    return {
-      ...state,
-      failedMessages: new Set([...state.failedMessages, clientId]),
-    };
-  },
-
-  addPending(state: MessageState, message: Message): MessageState {
-    return {
-      ...state,
-      messages: [...state.messages, message],
-      pendingMessages: new Map([...state.pendingMessages, [message.clientId!, message]]),
-    };
-  },
-
-  setOlder(state: MessageState, messages: Message[], hasMore: boolean): MessageState {
-    const msgs = sortMessages([...messages, ...state.messages]);
-    return {
-      ...state,
-      messages: msgs,
-      loadingOlder: false,
-      hasOlder: hasMore,
-      oldestId: messages.length > 0 ? messages[0]!.id : state.oldestId,
-    };
-  },
-
-  setLoading(state: MessageState, loading: boolean): MessageState {
-    return { ...state, loadingOlder: loading };
-  },
-
-  setInitial(state: MessageState, msgs: Message[], hasMore: boolean): MessageState {
-    const sorted = sortMessages(msgs);
-    return {
-      ...state,
-      messages: sorted,
-      hasOlder: hasMore,
-      oldestId: sorted.length > 0 ? sorted[0]!.id : undefined,
-    };
-  },
+/** Слияние по id, а собственных — по clientId (эхо и ack не создают дубль). */
+const upsert = (list: ChatItem[], item: ChatItem): ChatItem[] => {
+  const i = list.findIndex((m) => m.id === item.id || (!!item.clientId && m.clientId === item.clientId));
+  return (i < 0 ? [...list, item] : list.map((m, j) => (j === i ? item : m))).sort(byTime);
 };
+
+const transition = (list: ChatItem[], clientId: string, to: Delivery, id?: string): ChatItem[] =>
+  list.map((m) => (m.clientId === clientId && allowed[m.status].includes(to) ? { ...m, status: to, id: id ?? m.id } : m));
+
+export const createMessagesSlice = (set: Set<MessagesSlice>): MessagesSlice => ({
+  messages: [],
+  hasOlder: true,
+  loadingOlder: false,
+  addPending: (item) => set((s) => ({ messages: upsert(s.messages, item) })),
+  receive: (m) => set((s) => ({ messages: upsert(s.messages, { ...m, status: 'sent' }) })),
+  markSent: (clientId, id) => set((s) => ({ messages: transition(s.messages, clientId, 'sent', id) })),
+  markFailed: (clientId) => set((s) => ({ messages: transition(s.messages, clientId, 'failed') })),
+  markPending: (clientId) => set((s) => ({ messages: transition(s.messages, clientId, 'pending') })),
+  loadOlderStarted: () => set(() => ({ loadingOlder: true })),
+  loadOlderDone: (page, hasMore) =>
+    set((s) => ({
+      messages: page.reduce((list, m) => upsert(list, { ...m, status: 'sent' }), s.messages),
+      hasOlder: hasMore,
+      loadingOlder: false,
+    })),
+  loadOlderFailed: () => set(() => ({ loadingOlder: false })),
+});

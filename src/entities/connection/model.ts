@@ -1,24 +1,19 @@
 import type { Connection } from '../../shared/contract';
 
-export interface ConnectionState {
+type Set<S> = (fn: (s: S) => Partial<S>) => void;
+
+export interface ConnectionSlice {
   connection: Connection;
   showConnectionBanner: boolean;
+  setConnection(connection: Connection): void;
+  showBanner(): void;
+  hideBanner(): void;
 }
 
-export const connectionActions = {
-  setConnection(state: ConnectionState, connection: Connection): ConnectionState {
-    return {
-      ...state,
-      connection,
-      showConnectionBanner: connection === 'connected' ? false : state.showConnectionBanner,
-    };
-  },
-
-  showBanner(state: ConnectionState): ConnectionState {
-    return { ...state, showConnectionBanner: state.connection === 'reconnecting' };
-  },
-
-  hideBanner(state: ConnectionState): ConnectionState {
-    return { ...state, showConnectionBanner: false };
-  },
-};
+export const createConnectionSlice = (set: Set<ConnectionSlice>): ConnectionSlice => ({
+  connection: 'connecting',
+  showConnectionBanner: false,
+  setConnection: (connection) => set(() => ({ connection })),
+  showBanner: () => set(() => ({ showConnectionBanner: true })),
+  hideBanner: () => set(() => ({ showConnectionBanner: false })),
+});

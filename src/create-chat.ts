@@ -1,138 +1,79 @@
 import { createStore } from 'zustand/vanilla';
 import { useStore } from 'zustand';
-import { Subject, Subscription } from 'rxjs';
-import type { CreateChat, Backend, ChatModel, Connection, Message } from './shared/contract';
-import { createTransport } from './shared/transport';
-import type { Action, State } from './model/types';
-import type { Deps } from './features/deps';
-import { createSendFeature } from './features/send';
-import { createReceiveFeature } from './features/receive';
-import { createOutboxFeature } from './features/outbox';
-import { createLoadOlderFeature } from './features/load-older';
-import { createBannerFeature } from './features/connection-banner';
+import type { Chat, ChatModel, CreateChat } from './shared/contract';
+import { createClock, createIds, createTimers } from './shared/runtime';
+import { createSession, createTransport } from './shared/transport';
+import { createConnectionSlice } from './entities/connection/model';
+import { createMessagesSlice } from './entities/message/model';
+import type { ActionMap, ActionType, ChatState, Deps } from './features/deps';
+import { connectionChanged } from './features/connection-banner/changed';
+import { loadOlder } from './features/load-older/load-older';
+import { flushOutbox } from './features/outbox/flush';
+import { receiveMessage } from './features/receive/receive';
+import { retryMessage } from './features/send/retry';
+import { resendMessage } from './features/send/resend';
+import { sendMessage } from './features/send/send';
 
-export const createChat: CreateChat = (backend: Backend) => {
+// Реестр: команда → сценарий (deps, payload). Единственное место, где они собираются.
+const scenarios: { [T in ActionType]: (d: Deps, p: ActionMap[T]) => unknown } = {
+  'message/send': sendMessage,
+  'message/retry': retryMessage,
+  'message/resend': resendMessage,
+  'message/receive': receiveMessage,
+  'outbox/flush': flushOutbox,
+  'history/loadOlder': loadOlder,
+  'connection/changed': connectionChanged,
+};
+
+export const createChat: CreateChat = (backend): Chat => {
+  const store = createStore<ChatState>()((set) => ({ ...createMessagesSlice(set), ...createConnectionSlice(set) }));
+  const timers = createTimers();
   const transport = createTransport(backend);
-  const actions$ = new Subject<Action>();
-  let idCounter = 0;
-
-  const store = createStore<any>((set) => {
-    const sortMsgs = (msgs: Message[]) => msgs.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-    return {
-      messages: [],
-      connection: 'connecting',
-      showConnectionBanner: false,
-      pendingMessages: new Map(),
-      failedMessages: new Set(),
-      oldestId: undefined,
-      hasOlder: true,
-      loadingOlder: false,
-      addPending: (msg: Message) => set((s: any) => ({
-        ...s,
-        messages: [...s.messages, msg],
-        pendingMessages: new Map([...s.pendingMessages, [msg.clientId, msg]]),
-      })),
-      markSent: (clientId: string, msg: Message) => set((s: any) => ({
-        ...s,
-        messages: sortMsgs([...s.messages.filter((m: Message) => m.clientId !== clientId), msg]),
-        pendingMessages: new Map([...s.pendingMessages].filter((k: any) => k[0] !== clientId)),
-        failedMessages: new Set([...s.failedMessages].filter((id: string) => id !== clientId)),
-      })),
-      markFailed: (clientId: string) => set((s: any) => ({
-        ...s,
-        failedMessages: new Set([...s.failedMessages, clientId]),
-      })),
-      receive: (msg: Message) => set((s: any) => {
-        const exists = s.messages.find((m: Message) => m.id === msg.id);
-        if (exists) return s;
-        const msgs = sortMsgs([...s.messages, msg]);
-        return {
-          ...s,
-          messages: msgs,
-          pendingMessages: new Map([...s.pendingMessages].filter((k: any) => k[0] !== msg.clientId)),
-          failedMessages: new Set([...s.failedMessages].filter((id: string) => id !== msg.clientId)),
-        };
-      }),
-      setConnection: (state: Connection) => set((s: any) => ({
-        ...s,
-        connection: state,
-        showConnectionBanner: state === 'connected' ? false : s.showConnectionBanner,
-      })),
-      setBanner: (show: boolean) => set((s: any) => ({ ...s, showConnectionBanner: show })),
-      setLoading: (loading: boolean) => set((s: any) => ({ ...s, loadingOlder: loading })),
-      prepend: (msgs: Message[], hasMore: boolean) => set((s: any) => ({
-        ...s,
-        messages: sortMsgs([...msgs, ...s.messages]),
-        hasOlder: hasMore,
-        loadingOlder: false,
-        oldestId: msgs.length > 0 ? msgs[0]!.id : s.oldestId,
-      })),
-    };
-  });
+  const session = createSession();
 
   const deps: Deps = {
-    store: store as any,
-    transport,
-    dispatch: (a) => actions$.next(a),
-    ids: { nextClientId: () => `c-${Date.now()}-${++idCounter}` },
+    store, transport, session, timers,
+    ids: createIds(),
+    clock: createClock(),
+    dispatch: (type, ...args) => run(type, ...args),
   };
+  // Канал команд: ничего не возвращает; сценарий стартует сразу (до первого await), ошибка не роняет остальные.
+  function run<T extends ActionType>(type: T, ...args: unknown[]): void {
+    // Единственное приведение (как в ТЗ 5.4): тип payload восстановлен из реестра ActionMap.
+    const scenario = scenarios[type] as (d: Deps, p: unknown) => unknown;
+    const fail = (e: unknown) => console.error(`[${type}]`, e);
+    try {
+      Promise.resolve(scenario(deps, args[0])).catch(fail);
+    } catch (e) {
+      fail(e);
+    }
+  }
 
-  let sub: Subscription | null = null;
+  const actions = {
+    send: (text: string) => deps.dispatch('message/send', { text }),
+    retry: (clientId: string) => deps.dispatch('message/retry', { clientId }),
+    loadOlder: () => deps.dispatch('history/loadOlder'),
+  };
+  let unsubscribe = () => {};
 
   return {
-    useChat() {
-      const state = useStore(store);
-      return {
-        messages: state.messages.map((m: Message) => ({
-          ...m,
-          status: !m.clientId || !state.pendingMessages.has(m.clientId)
-            ? ('sent' as const)
-            : state.failedMessages.has(m.clientId)
-              ? ('failed' as const)
-              : ('pending' as const),
-        })),
-        connection: state.connection,
-        showConnectionBanner: state.showConnectionBanner,
-        loadingOlder: state.loadingOlder,
-        hasOlder: state.hasOlder,
-        send(text) {
-          const clientId = deps.ids.nextClientId();
-          actions$.next({ type: 'message/send', clientId, text });
-        },
-        retry(clientId) {
-          actions$.next({ type: 'message/retry', clientId });
-        },
-        loadOlder() {
-          actions$.next({ type: 'loadOlder/request' });
-        },
-      };
+    useChat(): ChatModel {
+      const { messages, connection, showConnectionBanner, hasOlder, loadingOlder } = useStore(store);
+      return { messages, connection, showConnectionBanner, hasOlder, loadingOlder, ...actions };
     },
-
     start() {
-      transport.connect();
-      sub = new Subscription();
-
-      sub.add(createSendFeature(deps, actions$).subscribe());
-      sub.add(createReceiveFeature(deps).subscribe());
-      sub.add(createOutboxFeature(deps).subscribe());
-      sub.add(createLoadOlderFeature(deps, actions$).subscribe());
-      sub.add(createBannerFeature(deps).subscribe());
-
-      transport.loadHistory().then(({ messages, hasMore }) => {
-        const sorted = [...messages].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-        store.setState((s: any) => ({
-          ...s,
-          messages: sorted,
-          hasOlder: hasMore,
-          oldestId: sorted.length > 0 ? sorted[0]!.id : undefined,
-        }));
-      });
+      unsubscribe = transport.on((e) =>
+        e.type === 'connection'
+          ? deps.dispatch('connection/changed', { state: e.state })
+          : deps.dispatch('message/receive', { message: e.message }),
+      );
+      transport.start();
+      deps.dispatch('history/loadOlder');
     },
-
     dispose() {
-      sub?.unsubscribe();
-      actions$.complete();
-      transport.dispose();
+      unsubscribe();
+      session.stop();
+      timers.clearAll();
     },
   };
 };
