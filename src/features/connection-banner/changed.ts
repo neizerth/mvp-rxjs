@@ -1,37 +1,28 @@
-import type { Observable } from 'rxjs';
-import { EMPTY, timer } from 'rxjs';
-import { tap, switchMap, ignoreElements } from 'rxjs/operators';
-import type { ActionType, Deps } from '../deps';
-import { ofType } from '../of-type';
+import { type Observable, of, timer } from 'rxjs';
+import { distinctUntilChanged, ignoreElements, map, switchMap, tap } from 'rxjs/operators';
+import type { Connection } from '../../shared/contract';
+import type { Deps } from '../deps';
+import { type Actions, ofType } from '../of-type';
 
 const BANNER_DELAY_MS = 3_000;
 
-/**
- * connection/changed: статус в стор, сессия, баннер (reconnecting 3 с подряд),
- * при connected — независимый запуск outbox/flush.
- */
-export function connectionBannerFeature(d: Deps, actions$: Observable<{ type: ActionType; payload?: unknown }>) {
-  return actions$.pipe(
+/** connection/changed: только статус в стор и сессия. */
+export const connectionFeature = (d: Deps, actions$: Actions) =>
+  actions$.pipe(
     ofType('connection/changed'),
     tap(({ state }) => {
-      const s = d.store.getState();
-      s.setConnection(state);
-      if (state === 'reconnecting') {
-        d.session.reconnecting();
-      } else if (state === 'connected') {
-        d.session.connected();
-        s.hideBanner();
-        d.dispatch('outbox/flush');
-      }
+      if (state === 'reconnecting') d.session.reconnecting();
+      if (state === 'connected') d.session.connected();
+      d.store.getState().setConnection(state);
     }),
-    switchMap(({ state }) => {
-      if (state === 'reconnecting') {
-        return timer(BANNER_DELAY_MS).pipe(
-          tap(() => d.store.getState().showBanner()),
-          ignoreElements(),
-        );
-      }
-      return EMPTY;
-    }),
+    ignoreElements(),
   );
-}
+
+/** Баннер: reconnecting 3 с подряд → показать; любой другой статус → скрыть сразу (switchMap отменяет таймер). */
+export const bannerFeature = (d: Deps, connection$: Observable<Connection>) =>
+  connection$.pipe(
+    switchMap((s) => (s === 'reconnecting' ? timer(BANNER_DELAY_MS).pipe(map(() => true)) : of(false))),
+    distinctUntilChanged(),
+    tap((show) => (show ? d.store.getState().showBanner() : d.store.getState().hideBanner())),
+    ignoreElements(),
+  );

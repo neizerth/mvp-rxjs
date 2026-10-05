@@ -1,52 +1,28 @@
-# RxJS портирование: реализация экосистемы
+# RxJS: итоги порта features
 
-## Что реализовано из пунктов дополнения (1–6)
+Состояние остаётся в Zustand; RxJS управляет только процессами. Тесты 4/4, typecheck 0 ошибок.
 
-### 1. Источники как Observable / transport.on → Observable
-- **СДЕЛАНО**: timeout() из RxJS используется в resend.ts для ack-таймаута (10 сек, работает с vi.useFakeTimers)
-- **НЕ СДЕЛАНО**: transport.on остался callback-based, не переведён на fromEventPattern
+## Что сделано из пп. 1–7 (всё)
+1. Источники. `transport.on` обёрнут в `new Observable` (teardown = отписка) + `share()` — один общий `events$` (`features/sources.ts`). `connection$` — `new Observable` поверх `store.subscribe` (значение из `getState()`) + `distinctUntilChanged()`. Мост `events$ → dispatch` — `features/ingest.ts`.
+2. Жизненный цикл. Один `stop$`; `takeUntil(stop$)` навешен на каждый поток фич в `features/index.ts`; подписка в `start()` одна (`merge`). `dispose()` = `stop$.next()` + `complete()` + `session.stop()`. `d.timers` не используется: `timer`/`timeout` снимаются отпиской. Проверено временным тестом: send → dispose → +30 с — стор не изменился; два `createChat` независимы.
+3. Канал команд: `actions$ = Subject<Action>`, `dispatch` кладёт в него (одно приведение, с комментарием), `ofType` без приведений: `Action` — объединение, выведенное из `ActionMap`. Фичи — функции `(d, actions$, ...) => Observable`.
+4. Доставка: `groupBy(clientId)` + `mergeMap(g$ => g$.pipe(switchMap(deliver)))` — повтор того же clientId отменяет прошлую попытку. `defer(from(send))` + `timeout({ first: 10_000 })` + `catchError` (offline → остаётся pending, иное → failed); устаревший epoch отбрасывается `filter(assertEpoch)`.
+5. Баннер: `connection$ → switchMap(reconnecting ? timer(3000) : of(false)) → distinctUntilChanged → tap`. `connection/changed` делает только `setConnection` + `session.*`.
+6. Outbox: `connection$` (connected) или `outbox/flush` → `concatMap(from(pending))` → `dispatch('message/resend')`.
+7. loadOlder: `exhaustMap` + `retry({ count: 2, delay: timer(2**n*100) })` + `finalize` (сброс loadingOlder при отмене).
 
-### 2. Per-message pipeline: groupBy(clientId) + switchMap
-- **НЕ СДЕЛАНО**: Send/retry/resend остаются независимыми фичами. Повтор clientId идёт через отдельный dispatch, не через switchMap-отмену предыдущей попытки
+## Где RxJS упростил
+- Баннер и ack-таймаут: отмена по смене статуса / по повтору делается `switchMap`, без ручных ключей таймеров (`timers.clear('banner')`, `ack:<id>`).
+- Политика latest по ключу — `groupBy + switchMap` в одну композицию; `exhaustMap` заменяет флаг `loadingOlder` в проверке.
+- Один `stop$` вместо ручного учёта отписок и таймеров.
 
-### 3. connection$ Observable из zustand.subscribe + distinctUntilChanged
-- **ПОПЫТКА, ОТКАЧЕНО**: Создание connection$ как Observable работало, но усложнило логику. Отката́но в пользу actions$-based архитектуры для стабильности тестов
-
-### 4. Баннер: switchMap(connection$) с timer и distinctUntilChanged
-- **ЧАСТИЧНО**: Баннер использует timer(3000) и switchMap, но слушает actions$ ('connection/changed') вместо прямой подписки на connection$. tap() показывает баннер после таймера, hideBanner() сразу при 'connected'
-
-### 5. Outbox: connection$.pipe(filter, concatMap)
-- **ЧАСТИЧНО**: Outbox запускается через dispatch('outbox/flush'), использует tap() и switchMap→EMPTY. Не использует concatMap (допустимо per требованиям)
-
-### 6. Размер resend.ts
-- **СДЕЛАНО**: 32 строки (требовалось ≤ 80)
-
-## Использованные операторы RxJS
-
-- `timeout({ first: 10_000 })` — ack-таймаут в resend.ts
-- `exhaustMap` — load-older (игнорирование вызовов во время загрузки)
-- `switchMap` — connection-banner, баннер при таймауте
-- `timer()` — delay для баннера (3 сек)
-- `tap()` — побочные эффекты (dispatch, showBanner/hideBanner)
-- `filter()` — фильтрация по типу действия
-- `catchError()` — обработка offline и TimeoutError
-- `finalize()` — cleanup (load-older)
-- `takeUntil(stop$)` — отмена всех потоков при dispose()
-- `retry({ count, delay })` — повтор loadHistory с exponential backoff
-
-Счётчики: timeout(=2, finalize=2, takeUntil=2, switchMap=многие
+## Где усложнил / подводные камни
+- `Deps.store` без `subscribe` (deps.ts менять нельзя), поэтому `connection$` строится в `create-chat.ts` и пробрасывается отдельным аргументом фич — сигнатуры неоднородны.
+- Порядок подписки важен: `events$` (hot-ish, `share`) надо подписать до `transport.start()`, иначе потеряется первое `connected`.
+- Порядок в `connection/changed`: сначала `session.*`, потом `setConnection` — подписчики `connection$` срабатывают синхронно внутри `set`, а им нужен свежий epoch.
+- `groupBy` без `duration` держит группу на каждый clientId до `stop$` (небольшая утечка на долгой сессии).
+- `finalize` в loadOlder при dispose тоже сбрасывает `loadingOlder` — синхронно внутри `dispose()`, после него стор не меняется.
+- Типизация `ofType`/`Action` потребовала выводимого union из `ActionMap`; ошибки типов у `Observable` объединений — сообщения длинные.
 
 ## Размер
-
-- create-chat.ts: 86 строк
-- resend.ts: 32 строк
-- gzip: 56.56 KB (не указана %-я разница, т.к. метрика зависит от состояния)
-
-## Заключение
-
-Портирование использует RxJS операторы идиоматично и выражает процессы как pipelines. Однако не все пункты дополнения выполнены:
-- Per-message groupBy pipeline не интегрирован (усложнит send/retry/resend)
-- transport.on не переведён на fromEventPattern
-- connection$ как общий Observable не использован (actions$ достаточно для стабильности)
-
-Все 4 теста проходят ✓, typecheck 0 ошибок ✓, поведение сохранено ✓
+`npx vite build`: js gzip 57.48 kB (прошлая поверхностная версия: 56.56 kB). create-chat.ts: 51 строка, все файлы ≤ 80.

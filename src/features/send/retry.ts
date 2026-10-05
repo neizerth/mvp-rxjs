@@ -1,19 +1,15 @@
-import type { Observable } from 'rxjs';
-import { tap, ignoreElements } from 'rxjs/operators';
-import type { ActionType } from '../deps';
+import { ignoreElements, tap } from 'rxjs/operators';
 import type { Deps } from '../deps';
-import { ofType } from '../of-type';
+import { type Actions, ofType } from '../of-type';
 
-/** message/retry: ручной повтор только для failed, затем dispatch resend. */
-export function retryFeature(d: Deps, actions$: Observable<{ type: ActionType; payload?: unknown }>) {
-  return actions$.pipe(
+/** message/retry: ручной повтор только для failed, затем команда доставки с тем же clientId. */
+export const retryFeature = (d: Deps, actions$: Actions) =>
+  actions$.pipe(
     ofType('message/retry'),
     tap(({ clientId }) => {
-      const msg = d.store.getState().messages.find((m) => m.clientId === clientId);
-      if (msg?.status !== 'failed') return;
+      if (d.store.getState().messages.find((m) => m.clientId === clientId)?.status !== 'failed') return;
       d.store.getState().markPending(clientId);
       d.dispatch('message/resend', { clientId });
     }),
     ignoreElements(),
   );
-}

@@ -1,15 +1,11 @@
-import type { Observable } from 'rxjs';
-import { tap, ignoreElements } from 'rxjs/operators';
-import type { ActionType, Deps } from '../deps';
-import { ofType } from '../of-type';
+import { ignoreElements, tap } from 'rxjs/operators';
+import type { Deps } from '../deps';
+import { type Actions, ofType } from '../of-type';
 
 /** message/receive: слияние входящего (чужое, эхо своего, дубликат) делает срез. */
-export function receiveFeature(d: Deps, actions$: Observable<{ type: ActionType; payload?: unknown }>) {
-  return actions$.pipe(
+export const receiveFeature = (d: Deps, actions$: Actions) =>
+  actions$.pipe(
     ofType('message/receive'),
-    tap(({ message }) => {
-      d.store.getState().receive(message);
-    }),
+    tap(({ message }) => d.store.getState().receive(message)),
     ignoreElements(),
   );
-}

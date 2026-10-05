@@ -1,32 +1,31 @@
-import { Observable, from, EMPTY, mergeMap } from 'rxjs';
-import { timeout, catchError, tap } from 'rxjs/operators';
-import type { ActionType, Deps } from '../deps';
-import { ofType } from '../of-type';
+import { EMPTY, defer, from } from 'rxjs';
+import { catchError, filter, groupBy, mergeMap, switchMap, tap, timeout } from 'rxjs/operators';
+import type { Deps } from '../deps';
+import { type Actions, ofType } from '../of-type';
 
 const ACK_TIMEOUT_MS = 10_000;
 
-/** message/resend: отправить pending-сообщение с timeout и обработкой ошибок. */
-export function resendFeature(d: Deps, actions$: Observable<{ type: ActionType; payload?: unknown }>) {
-  return actions$.pipe(
+/** Одна попытка доставки: offline — остаётся pending (дошлёт outbox), нет ack за 10 с или иная ошибка — failed. */
+const deliver = (d: Deps, clientId: string) =>
+  defer(() => {
+    const msg = d.store.getState().messages.find((m) => m.clientId === clientId);
+    if (msg?.status !== 'pending') return EMPTY;
+    const epoch = d.session.epoch();
+    return from(d.transport.send(clientId, msg.text)).pipe(
+      timeout({ first: ACK_TIMEOUT_MS }),
+      filter(() => d.session.assertEpoch(epoch)), // результат старого поколения отбрасываем
+      tap((ack) => d.store.getState().markSent(clientId, ack.id)),
+      catchError((e) => {
+        if (!(e instanceof Error && e.message === 'offline')) d.store.getState().markFailed(clientId);
+        return EMPTY;
+      }),
+    );
+  });
+
+/** message/resend: по каждому clientId своя ветка; повтор того же clientId отменяет предыдущую попытку (latest). */
+export const resendFeature = (d: Deps, actions$: Actions) =>
+  actions$.pipe(
     ofType('message/resend'),
-    mergeMap(({ clientId }) => {
-      const msg = d.store.getState().messages.find((m) => m.clientId === clientId);
-      if (!msg || msg.status !== 'pending') return EMPTY;
-      const epoch = d.session.epoch();
-      return from(d.transport.send(clientId, msg.text)).pipe(
-        timeout({ first: ACK_TIMEOUT_MS }),
-        tap((ack) => {
-          if (d.session.assertEpoch(epoch)) {
-            d.store.getState().markSent(clientId, ack.id);
-          }
-        }),
-        catchError((e) => {
-          if (!(e instanceof Error && e.message === 'offline')) {
-            d.store.getState().markFailed(clientId);
-          }
-          return EMPTY;
-        }),
-      );
-    }),
+    groupBy(({ clientId }) => clientId),
+    mergeMap((group$) => group$.pipe(switchMap(({ clientId }) => deliver(d, clientId)))),
   );
-}
