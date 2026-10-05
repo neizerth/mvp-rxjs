@@ -1,5 +1,5 @@
 import { Observable } from 'rxjs';
-import type { Backend, Message } from '../../../shared/contract';
+import type { Backend, Message } from '../../shared/contract';
 import type { Action } from '../../types';
 
 export function createReceiveStream(backend: Backend): Observable<Action> {

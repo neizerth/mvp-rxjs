@@ -1,6 +1,6 @@
 import { mergeMap } from 'rxjs/operators';
 import { Observable } from 'rxjs';
-import type { Backend } from '../../../shared/contract';
+import type { Backend } from '../../shared/contract';
 import type { Action } from '../../types';
 
 export function createSendStream(

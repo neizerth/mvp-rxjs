@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { BehaviorSubject, Subject, Subscription, mergeMap } from 'rxjs';
-import type { CreateChat, Backend, ChatModel } from '../shared/contract';
-import { createTransport } from '../shared/transport';
+import type { CreateChat, Backend, ChatModel } from './shared/contract';
+import { createTransport } from './shared/transport';
 import type { State } from './types';
 import { createReceiveStream } from './features/receive';
 import { createConnectionStream } from './entities/connection';

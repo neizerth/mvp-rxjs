@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './shared/ui/App';
 import { createFakeBackend } from './shared/backend';
-import { createChat } from './model/create-chat';
+import { createChat } from './create-chat';
 import { createTransport } from './shared/transport';
 
 const backend = createFakeBackend();

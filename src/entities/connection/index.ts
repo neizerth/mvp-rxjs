@@ -1,5 +1,5 @@
 import { Observable } from 'rxjs';
-import type { Backend, Connection } from '../../../shared/contract';
+import type { Backend, Connection } from '../../shared/contract';
 import type { Action } from '../../types';
 
 export function createConnectionStream(backend: Backend): Observable<Action> {
