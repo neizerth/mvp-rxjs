@@ -1,136 +1,74 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { createFakeBackend } from './backend';
 import type { CreateChat } from './contract';
 
+// Async-тест: бэкенд отвечает промисами, поэтому таймеры продвигаем асинхронно (микротаски тоже выполняются).
+const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+
 export function describeChat(createChat: CreateChat) {
   describe('Chat', () => {
-    it('After start and timer flush, shows 30 messages, send and ack', () => {
-      vi.useFakeTimers();
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    const setup = async () => {
       const backend = createFakeBackend();
       const chat = createChat(backend);
-      const { result } = renderHook(() => chat.useChat());
+      const hook = renderHook(() => chat.useChat());
+      await act(async () => { chat.start(); });
+      await advance(500);
+      return { backend, chat, result: hook.result };
+    };
 
-      act(() => {
-        chat.start();
-        vi.runAllTimers();
-      });
+    it('loads 30 messages, send becomes sent exactly once', async () => {
+      const { chat, result } = await setup();
+      expect(result.current.messages).toHaveLength(30);
+      expect(result.current.hasOlder).toBe(true);
 
-      expect(result.current!.messages).toHaveLength(30);
-      expect(result.current!.hasOlder).toBe(true);
+      act(() => result.current.send('hi'));
+      expect(result.current.messages.find((m) => m.text === 'hi')?.status).toBe('pending');
+      await advance(500);
 
-      act(() => {
-        result.current!.send('hi');
-        vi.runAllTimers();
-      });
-
-      const ownMessages = result.current!.messages.filter((m) => m.text === 'hi');
-      expect(ownMessages).toHaveLength(1);
-      expect(ownMessages[0]!.status).toBe('sent');
-
+      const own = result.current.messages.filter((m) => m.text === 'hi');
+      expect(own).toHaveLength(1);
+      expect(own[0]?.status).toBe('sent');
       chat.dispose();
-      vi.useRealTimers();
     });
 
-    it('Offline send stays pending, then sent after reconnect', () => {
-      vi.useFakeTimers();
-      const backend = createFakeBackend();
-      const chat = createChat(backend);
-      const { result } = renderHook(() => chat.useChat());
+    it('offline send stays pending, delivered once after reconnect', async () => {
+      const { backend, chat, result } = await setup();
+      act(() => backend.chaos.dropConnection(5000));
+      await advance(1000);
 
-      act(() => {
-        chat.start();
-        vi.runAllTimers();
-      });
+      act(() => result.current.send('offline'));
+      await advance(500);
+      expect(result.current.messages.find((m) => m.text === 'offline')?.status).toBe('pending');
 
-      act(() => {
-        backend.chaos.dropConnection(5000);
-        vi.advanceTimersByTime(2000);
-      });
-
-      act(() => {
-        result.current.send('offline');
-        vi.runAllTimers();
-      });
-
-      const offlineMessages = result.current!.messages.filter((m) => m.text === 'offline');
-      expect(offlineMessages[0]!.status).toBe('pending');
-
-      act(() => {
-        vi.advanceTimersByTime(3500);
-      });
-
-      const sentMessages = result.current!.messages.filter((m) => m.text === 'offline');
-      expect(sentMessages[0]!.status).toBe('sent');
-      expect(sentMessages).toHaveLength(1);
-
+      await advance(5000);
+      const own = result.current.messages.filter((m) => m.text === 'offline');
+      expect(own).toHaveLength(1);
+      expect(own[0]?.status).toBe('sent');
       chat.dispose();
-      vi.useRealTimers();
     });
 
-    it('Connection banner appears after 3s reconnecting, disappears on reconnect', () => {
-      vi.useFakeTimers();
-      const backend = createFakeBackend();
-      const chat = createChat(backend);
-      const { result } = renderHook(() => chat.useChat());
-
-      act(() => {
-        chat.start();
-        vi.runAllTimers();
-      });
-
-      act(() => {
-        backend.chaos.dropConnection(5000);
-        vi.advanceTimersByTime(2000);
-      });
-
+    it('banner shows after 3s of reconnecting and hides on connect', async () => {
+      const { backend, chat, result } = await setup();
+      act(() => backend.chaos.dropConnection(5000));
+      await advance(2000);
       expect(result.current.showConnectionBanner).toBe(false);
-
-      act(() => {
-        vi.advanceTimersByTime(1200);
-      });
-
+      await advance(1200);
       expect(result.current.showConnectionBanner).toBe(true);
-
-      act(() => {
-        vi.advanceTimersByTime(2000);
-      });
-
+      await advance(2000);
       expect(result.current.showConnectionBanner).toBe(false);
-
       chat.dispose();
-      vi.useRealTimers();
     });
 
-    it('loadOlder gives 60 messages, duplicate call gives 60 total', () => {
-      vi.useFakeTimers();
-      const backend = createFakeBackend();
-      const chat = createChat(backend);
-      const { result } = renderHook(() => chat.useChat());
-
-      act(() => {
-        chat.start();
-        vi.runAllTimers();
-      });
-
-      const initialCount = result.current.messages.length;
-
-      act(() => {
-        result.current.loadOlder();
-        vi.runAllTimers();
-      });
-
-      expect(result.current.messages.length).toBe(60);
-
-      act(() => {
-        result.current.loadOlder();
-        vi.runAllTimers();
-      });
-
-      expect(result.current.messages.length).toBe(60);
-
+    it('loadOlder prepends a page; a call during loading is ignored', async () => {
+      const { chat, result } = await setup();
+      act(() => { result.current.loadOlder(); result.current.loadOlder(); });
+      await advance(500);
+      expect(result.current.messages).toHaveLength(60);
       chat.dispose();
-      vi.useRealTimers();
     });
   });
 }
