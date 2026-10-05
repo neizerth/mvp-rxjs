@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { BehaviorSubject, Subject, Subscription, mergeMap } from 'rxjs';
 import type { CreateChat, Backend, ChatModel } from '../shared/contract';
+import { createTransport } from '../shared/transport';
 import type { State } from './types';
 import { createReceiveStream } from './features/receive';
 import { createConnectionStream } from './entities/connection';
@@ -16,7 +17,8 @@ const initialState: State = {
   showConnectionBanner: false,
 };
 
-export const createChat: CreateChat = (backend) => {
+export const createChat: CreateChat = (backend: Backend) => {
+  const transport = createTransport(backend);
   const state$ = new BehaviorSubject<State>(initialState);
   const sendAction$ = new Subject<{ clientId: string; text: string }>();
   const loadOlder$ = new Subject<void>();
@@ -92,10 +94,10 @@ export const createChat: CreateChat = (backend) => {
   return {
     useChat,
     start() {
-      backend.connect();
+      transport.connect();
       subs = new Subscription();
 
-      subs.add(createReceiveStream(backend).subscribe((action) => {
+      subs.add(createReceiveStream(transport.backend).subscribe((action) => {
         if (action.type === 'receive') {
           setState((s) => {
             const existing = s.messages.find((m) => m.id === action.message.id);
@@ -137,7 +139,7 @@ export const createChat: CreateChat = (backend) => {
       }));
 
       let lastConnection = state$.value.connection;
-      subs.add(createConnectionStream(backend).subscribe((action) => {
+      subs.add(createConnectionStream(transport.backend).subscribe((action) => {
         if (action.type === 'connectionChanged') {
           const wasConnected = state$.value.connection === 'connected';
           setState((s) => {
@@ -197,7 +199,7 @@ export const createChat: CreateChat = (backend) => {
                   }
                 }, 10000);
 
-                backend
+                transport
                   .send(clientId, text)
                   .then((message) => {
                     if (!done) {
@@ -247,7 +249,7 @@ export const createChat: CreateChat = (backend) => {
           const s = state$.value;
           if (!s.hasOlder || s.loadingOlder) return;
           setState((st) => ({ ...st, loadingOlder: true }));
-          backend.loadHistory(s.oldestId).then(({ messages, hasMore }) => {
+          transport.loadHistory(s.oldestId).then(({ messages, hasMore }) => {
             setState((st) => {
               const all = [...messages, ...st.messages];
               all.sort((a, b) =>
@@ -267,7 +269,7 @@ export const createChat: CreateChat = (backend) => {
         })
       );
 
-      backend.loadHistory().then(({ messages, hasMore }) => {
+      transport.loadHistory().then(({ messages, hasMore }) => {
         setState((s) => {
           const sorted = [...messages].sort((a, b) =>
             a.createdAt !== b.createdAt
@@ -289,6 +291,7 @@ export const createChat: CreateChat = (backend) => {
       if (connectionBannerTimer) clearTimeout(connectionBannerTimer);
       sendAction$.complete();
       loadOlder$.complete();
+      transport.dispose();
     },
   };
 };
