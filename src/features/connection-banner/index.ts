@@ -1,25 +1,56 @@
-import {
-  switchMap,
-  map,
-  startWith,
-  distinctUntilChanged,
-} from 'rxjs/operators';
-import { Observable, timer, of } from 'rxjs';
-import type { Action } from '../../types';
+import type { StoreApi } from 'zustand';
+import type { Connection } from '../../shared/contract';
+import type { Transport } from '../../shared/transport';
 
-export function createConnectionBannerStream(
-  connection$: Observable<string>
-): Observable<Action> {
-  return connection$.pipe(
-    switchMap((state) => {
-      if (state === 'reconnecting') {
-        return timer(3000).pipe(
-          map(() => ({ type: 'bannerShow' as const })),
-          startWith({ type: 'bannerHide' as const })
-        );
+interface AppState {
+  connection: Connection;
+  showConnectionBanner: boolean;
+}
+
+export function createBannerProcess(deps: {
+  store: StoreApi<AppState>;
+  transport: Transport;
+}) {
+  const { store, transport } = deps;
+  let bannerTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const unsubBackend = transport.backend.on((event) => {
+    if (event.type === 'connection') {
+      const s = store.getState();
+      const newConn = event.state;
+
+      if (newConn === 'reconnecting') {
+        if (s.connection !== 'reconnecting') {
+          if (bannerTimer) clearTimeout(bannerTimer);
+          bannerTimer = setTimeout(() => {
+            const st = store.getState();
+            if (st.connection === 'reconnecting') {
+              store.setState({
+                ...st,
+                showConnectionBanner: true,
+              });
+            }
+          }, 3000);
+        }
+        store.setState({ ...s, connection: newConn });
+      } else {
+        if (bannerTimer) {
+          clearTimeout(bannerTimer);
+          bannerTimer = null;
+        }
+        store.setState({
+          ...s,
+          connection: newConn,
+          showConnectionBanner: false,
+        });
       }
-      return of({ type: 'bannerHide' as const });
-    }),
-    distinctUntilChanged((a, b) => a.type === b.type)
-  );
+    }
+  });
+
+  return {
+    unsubscribe() {
+      if (bannerTimer) clearTimeout(bannerTimer);
+      unsubBackend();
+    },
+  };
 }

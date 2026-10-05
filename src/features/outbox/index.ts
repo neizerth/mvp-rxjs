@@ -1,30 +1,32 @@
-import {
-  concatMap,
-  filter,
-  tap,
-  startWith,
-  withLatestFrom,
-} from 'rxjs/operators';
-import { Observable, Subject } from 'rxjs';
-import type { Action } from '../../types';
-import type { State } from '../../types';
+import type { StoreApi } from 'zustand';
+import type { Message } from '../../shared/contract';
+import type { Transport } from '../../shared/transport';
 
-export function createOutboxStream(
-  connectionAction$: Observable<{
-    type: 'connectionChanged';
-    state: string;
-  }>,
-  state$: Observable<State>,
-  sendAction$: Subject<{ clientId: string; text: string }>
-): Observable<never> {
-  return connectionAction$.pipe(
-    filter((a) => a.state === 'connected'),
-    withLatestFrom(state$),
-    tap(([_, state]) => {
-      state.pendingMessages.forEach((message, clientId) => {
-        sendAction$.next({ clientId, text: message.text });
-      });
-    }),
-    concatMap(() => new Observable<never>(() => {}))
-  );
+interface AppState {
+  pendingMessages: Map<string, Message>;
+}
+
+export function createOutboxProcess(deps: {
+  store: StoreApi<AppState>;
+  transport: Transport;
+}) {
+  const { store, transport } = deps;
+
+  const unsubBackend = transport.backend.on((event) => {
+    if (event.type === 'connection' && event.state === 'connected') {
+      const s = store.getState();
+      const processSend = (deps.store as any).__processSend;
+      if (processSend) {
+        s.pendingMessages.forEach((msg, clientId) => {
+          processSend(clientId, msg.text);
+        });
+      }
+    }
+  });
+
+  return {
+    unsubscribe() {
+      unsubBackend();
+    },
+  };
 }
