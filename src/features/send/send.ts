@@ -1,18 +1,17 @@
 import type { Observable } from 'rxjs';
-import { mergeMap } from 'rxjs/operators';
+import { tap, ignoreElements } from 'rxjs/operators';
 import type { ActionType } from '../deps';
 import type { Deps } from '../deps';
 import { ofType } from '../of-type';
-import { resendMessage } from './resend';
 
-/** message/send: оптимистичное pending в стор, затем доставка. */
+/** message/send: оптимистичное pending в стор, затем dispatch resend. */
 export function sendFeature(
   d: Deps,
   actions$: Observable<{ type: ActionType; payload?: unknown }>,
 ) {
   return actions$.pipe(
     ofType('message/send'),
-    mergeMap(({ text }) => {
+    tap(({ text }) => {
       const clientId = d.ids.clientId();
       d.store.getState().addPending({
         id: clientId,
@@ -22,7 +21,8 @@ export function sendFeature(
         createdAt: d.clock.now(),
         status: 'pending',
       });
-      return resendMessage(d, { clientId });
+      d.dispatch('message/resend', { clientId });
     }),
+    ignoreElements(),
   );
 }

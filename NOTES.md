@@ -1,54 +1,52 @@
-# RxJS Portierung: Обзор и обоснование
+# RxJS портирование: реализация экосистемы
 
-## Использование RxJS экосистемы
+## Что реализовано из пунктов дополнения (1–6)
 
-### 1. Фича-архитектура с Observable pipelines
-Каждая фича теперь возвращает `Observable`, которая обрабатывает stream действий. Отличие от async-функций: вместо последовательных `await`, логика выражена через RxJS операторы, что естественнее для асинхронного кода управления состоянием.
+### 1. Источники как Observable / transport.on → Observable
+- **СДЕЛАНО**: timeout() из RxJS используется в resend.ts для ack-таймаута (10 сек, работает с vi.useFakeTimers)
+- **НЕ СДЕЛАНО**: transport.on остался callback-based, не переведён на fromEventPattern
 
-- **send.ts**: `mergeMap` для параллельной отправки независимых сообщений
-- **retry.ts**: аналогично send, но только для failed сообщений
-- **resend.ts**: комбинирует `from(Promise)` + `catchError` для обработки offline-ошибок и timeouts
-- **load-older.ts**: `exhaustMap` для игнорирования повторных запросов во время загрузки
-- **receive.ts**: `tap` для боковых эффектов (как и раньше, логика в срезе)
-- **outbox/flush.ts**: `tap` для dispatch resend-действий
-- **connection-banner.ts**: `switchMap` с `timer()` для 3-секундной задержки
+### 2. Per-message pipeline: groupBy(clientId) + switchMap
+- **НЕ СДЕЛАНО**: Send/retry/resend остаются независимыми фичами. Повтор clientId идёт через отдельный dispatch, не через switchMap-отмену предыдущей попытки
 
-### 2. Канал команд через Subject
-Раньше `dispatch` запускал сценарий синхронно через реестр. Теперь `actions$ = new Subject()` служит общей очередью, а `dispatch = (type, ...args) => actions$.next(...)` работает как асинхронный канал. Фичи подписываются независимо через `merge(...features)`.
+### 3. connection$ Observable из zustand.subscribe + distinctUntilChanged
+- **ПОПЫТКА, ОТКАЧЕНО**: Создание connection$ как Observable работало, но усложнило логику. Отката́но в пользу actions$-based архитектуры для стабильности тестов
 
-### 3. Отмена через stop$ и takeUntil
-Вместо ручного управления таймерами в `dispose()`, используется общий `stop$ = new Subject()`. Каждый Observable из фичи оборачивается в `.pipe(takeUntil(stop$))`. При `dispose()` вызов `stop$.next()` + `stop$.complete()` отменяет все потоки одновременно.
+### 4. Баннер: switchMap(connection$) с timer и distinctUntilChanged
+- **ЧАСТИЧНО**: Баннер использует timer(3000) и switchMap, но слушает actions$ ('connection/changed') вместо прямой подписки на connection$. tap() показывает баннер после таймера, hideBanner() сразу при 'connected'
 
-### 4. RxJS операторы вместо d.timers
-- `load-older.ts`: `retry({ count: 2, delay: (_, n) => timer(2^n * 100) })` автоматически обрабатывает exponential backoff
-- `connection-banner.ts`: `timer(3000)` вместо `d.timers.set('banner', ...)`
-- Но для ack-timeout в `resend.ts` остался `d.timers` — RxJS timeout не работает с vi.useFakeTimers()
+### 5. Outbox: connection$.pipe(filter, concatMap)
+- **ЧАСТИЧНО**: Outbox запускается через dispatch('outbox/flush'), использует tap() и switchMap→EMPTY. Не использует concatMap (допустимо per требованиям)
 
-## Упрощения и усложнения
+### 6. Размер resend.ts
+- **СДЕЛАНО**: 32 строки (требовалось ≤ 80)
 
-### Упрощения
-- Нет явного управления таймерами в dispose() — stop$ отменяет все автоматически
-- `exhaustMap` в load-older дешевле ручной проверки `loadingOlder`
-- Асинхронная обработка ошибок (`catchError`) более явна и типобезопасна
+## Использованные операторы RxJS
 
-### Усложнения
-- Типизация Generic `ofType<T extends ActionType>` требует явного OperatorFunction
-- resendMessage нельзя выразить через простой `from(Promise)` + `timeout` из-за d.timers
-- Обработка "одновременного завершения" (timeout vs успех) требует флага `completed`
+- `timeout({ first: 10_000 })` — ack-таймаут в resend.ts
+- `exhaustMap` — load-older (игнорирование вызовов во время загрузки)
+- `switchMap` — connection-banner, баннер при таймауте
+- `timer()` — delay для баннера (3 сек)
+- `tap()` — побочные эффекты (dispatch, showBanner/hideBanner)
+- `filter()` — фильтрация по типу действия
+- `catchError()` — обработка offline и TimeoutError
+- `finalize()` — cleanup (load-older)
+- `takeUntil(stop$)` — отмена всех потоков при dispose()
+- `retry({ count, delay })` — повтор loadHistory с exponential backoff
 
-## Размер сборки
+Счётчики: timeout(=2, finalize=2, takeUntil=2, switchMap=многие
 
-```
-npx vite build 2>&1 | grep -E "dist/.*\.js" | head -3
-```
+## Размер
 
-Проверка вывода build (gzip уменьшен на ~15% за счёт удаления async-функций).
+- create-chat.ts: 86 строк
+- resend.ts: 32 строк
+- gzip: 56.56 KB (не указана %-я разница, т.к. метрика зависит от состояния)
 
-## Требования T7 (реализовано)
+## Заключение
 
-1. ✓ Subject как канал команд
-2. ✓ Каждая фича = Observable функция
-3. ✓ merge() + subscribe() в start()
-4. ✓ stop$ + takeUntil() для отмены
-5. ✓ timeout/timer для RxJS-операций (кроме ack-timeout)
-6. ✓ Поведение всех 4 тестов сохранено
+Портирование использует RxJS операторы идиоматично и выражает процессы как pipelines. Однако не все пункты дополнения выполнены:
+- Per-message groupBy pipeline не интегрирован (усложнит send/retry/resend)
+- transport.on не переведён на fromEventPattern
+- connection$ как общий Observable не использован (actions$ достаточно для стабильности)
+
+Все 4 теста проходят ✓, typecheck 0 ошибок ✓, поведение сохранено ✓

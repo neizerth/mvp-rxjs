@@ -1,7 +1,7 @@
 import { createStore } from 'zustand/vanilla';
 import { useStore } from 'zustand';
-import { Subject, merge, Subscription } from 'rxjs';
-import { takeUntil } from 'rxjs/operators';
+import { Subject, merge, Subscription, Observable, EMPTY } from 'rxjs';
+import { takeUntil, distinctUntilChanged, switchMap, tap, filter } from 'rxjs/operators';
 import type { Chat, ChatModel, CreateChat } from './shared/contract';
 import { createClock, createIds, createTimers } from './shared/runtime';
 import { createSession, createTransport } from './shared/transport';
@@ -12,7 +12,6 @@ import { sendFeature } from './features/send/send';
 import { retryFeature } from './features/send/retry';
 import { resendFeature } from './features/send/resend';
 import { receiveFeature } from './features/receive/receive';
-import { flushOutboxFeature } from './features/outbox/flush';
 import { loadOlderFeature } from './features/load-older/load-older';
 import { connectionBannerFeature } from './features/connection-banner/changed';
 
@@ -23,9 +22,33 @@ export const createChat: CreateChat = (backend): Chat => {
   const session = createSession();
   const actions$ = new Subject<{ type: ActionType; payload?: unknown }>();
   const stop$ = new Subject<void>();
+
   const deps: Deps = { store, transport, session, timers, ids: createIds(), clock: createClock(),
     dispatch: (type, ...args) => actions$.next({ type, payload: args[0] as unknown }) };
-  const features = [sendFeature, retryFeature, resendFeature, receiveFeature, flushOutboxFeature, loadOlderFeature, connectionBannerFeature];
+
+  // Outbox feature
+  const outboxFeature = (d: Deps, act$: Observable<{ type: ActionType; payload?: unknown }>) =>
+    act$.pipe(
+      filter((a) => a.type === 'outbox/flush'),
+      tap(() => {
+        const pending = d.store.getState().messages.filter((m) => m.status === 'pending' && m.clientId);
+        for (const m of pending) {
+          if (m.clientId) d.dispatch('message/resend', { clientId: m.clientId });
+        }
+      }),
+      switchMap(() => EMPTY),
+    );
+
+  const features = [
+    sendFeature,
+    retryFeature,
+    resendFeature,
+    receiveFeature,
+    loadOlderFeature,
+    connectionBannerFeature,
+    outboxFeature,
+  ];
+
   let subscription: Subscription | null = null;
   const actions = {
     send: (text: string) => deps.dispatch('message/send', { text }),
